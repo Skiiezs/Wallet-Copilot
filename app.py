@@ -70,6 +70,58 @@ def card(title, desc, fields, color=0x57F287):
         "fields": [{"name": n, "value": str(v)[:1024], "inline": True} for n, v in fields],
     }
 
+    def money(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    if n >= 1_000_000:
+        return f"${n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"${n/1_000:.1f}K"
+    if n >= 1:
+        return f"${n:.2f}"
+    return f"${n:.6f}".rstrip("0")
+
+
+def rick_embed(kind, ticker, name, mint, body, stats, color):
+    px = stats.get("priceUsd") or "—"
+    chg = stats.get("chg24")
+    chg_s = f"{float(chg):+.1f}%" if chg is not None else "—"
+    desc = (
+        f"**{name or ticker}**\n"
+        f"`{mint}`\n"
+        f"```\n"
+        f"MC {money(stats.get('mc')):<10} Liq {money(stats.get('liq'))}\n"
+        f"Vol {money(stats.get('vol24')):<9}  5m {money(stats.get('vol5'))}\n"
+        f"Px  ${px}   24h {chg_s}\n"
+        f"Age {stats.get('ageHours') or '—'}h   {stats.get('dex') or '—'}\n"
+        f"```\n"
+        f"{body}"
+    )
+    axiom = f"https://axiom.trade/t/{mint}"
+    photon = f"https://photon-sol.tinyastro.io/en/lp/{mint}"
+    dex = stats.get("pairUrl") or f"https://dexscreener.com/solana/{mint}"
+    gmgn = f"https://gmgn.ai/sol/token/{mint}"
+    embed = {
+        "author": {"name": "SKYZ  ·  scan"},
+        "title": f"${ticker}   {kind}",
+        "url": dex,
+        "description": desc[:3900],
+        "color": color,
+        "footer": {"text": "axiom  ·  photon  ·  dex  ·  gmgn"},
+        "fields": [
+            {
+                "name": "venues",
+                "value": f"[Axiom]({axiom}) · [Photon]({photon}) · [Dex]({dex}) · [GMGN]({gmgn})",
+                "inline": False,
+            }
+        ],
+    }
+    if stats.get("image"):
+        embed["thumbnail"] = {"url": stats["image"]}
+    return embed
+
 
 def dex_stats(mint):
     r = requests.get(f"https://api.dexscreener.com/tokens/v1/solana/{mint}", timeout=15)
@@ -88,6 +140,8 @@ def dex_stats(mint):
         age_h = (time.time() * 1000 - created) / 3_600_000
     vol = p.get("volume") or {}
     tx = p.get("txns") or {}
+        info = p.get("info") or {}
+    chg = (p.get("priceChange") or {}).get("h24")
     return {
         "name": base.get("name"),
         "symbol": base.get("symbol"),
@@ -106,6 +160,8 @@ def dex_stats(mint):
         "ageHours": round(age_h, 2) if age_h is not None else None,
         "pairCreatedAt": created,
         "rawPairCount": len(sol),
+        "image": info.get("imageUrl"),
+        "chg24": chg,
     }
 
 
@@ -266,6 +322,9 @@ def process_buy(buy):
             ("Dex", stats.get("dex") or "—"),
         ],
     )
+       name = stats.get("name") or ticker
+    body = report[:1600] if report else "_tape only_"
+    embed = rick_embed("new bag", ticker, name, mint, body, stats, 0x00C2A8)
     discord(embeds=[embed])
 
 def handle_payload(payload):
