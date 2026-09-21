@@ -32,6 +32,7 @@ grok_done = set()
 watch = {}
 last_whale_ping = {}
 seen_trades = set()
+wallet_cache = {}
 
 KOLS = {
     "Cented": "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
@@ -84,9 +85,17 @@ def helius_rpc(method, params):
             json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
             timeout=20,
         )
-        return (r.json() or {}).get("result") or {}
+        data = r.json() or {}
+        if "result" in data:
+            return data.get("result")
+        return {}
     except Exception:
         return {}
+
+
+def helius_rpc_list(method, params):
+    res = helius_rpc(method, params)
+    return res if isinstance(res, list) else []
 
 
 def token_account_owner(token_acc):
@@ -499,6 +508,164 @@ def whale_buys(pair, mint, min_usd):
     return out
 
 
+def sol_balance(addr):
+    try:
+        res = helius_rpc("getBalance", [addr]) or {}
+        lamports = res.get("value") if isinstance(res, dict) else res
+        return float(lamports or 0) / 1_000_000_000
+    except Exception:
+        return 0.0
+
+
+def wallet_profile(addr):
+    if not addr:
+        return {}
+    hit = wallet_cache.get(addr)
+    if hit and time.time() - hit.get("t", 0) < 600:
+        return hit
+    sigs = helius_rpc_list(
+        "getSignaturesForAddress",
+        [addr, {"limit": 40}],
+    )
+    n = len(sigs)
+    first_ts = None
+    last_ts = None
+    err = 0
+    for s in sigs:
+        if not isinstance(s, dict):
+            continue
+        if s.get("err"):
+            err += 1
+        ts = s.get("blockTime")
+        if ts:
+            last_ts = last_ts or ts
+            first_ts = ts
+    age_h = None
+    if first_ts:
+        age_h = max(0.0, (time.time() - first_ts) / 3600)
+    recent = 0
+    if last_ts and first_ts and n >= 2:
+        span = max(1.0, last_ts - first_ts)
+        recent = n / (span / 3600)
+    bal = sol_balance(addr)
+    tokens = 0
+    try:
+        accs = helius_rpc(
+            "getTokenAccountsByOwner",
+            [addr, {"programId": TOKEN_PROGRAM}, {"encoding": "jsonParsed"}],
+        ) or {}
+        tokens += len(accs.get("value") or [])
+    except Exception:
+        pass
+    kind = "trader"
+    score = 3
+    if addr in KOL_BY_ADDR:
+        kind = "KOL / trader"
+        score = 5
+    elif age_h is not None and age_h < 3 and n >= 20:
+        kind = "vol bot"
+        score = 1
+    elif n >= 30 and recent >= 15:
+        kind = "vol bot"
+        score = 1
+    elif tokens >= 20 and n >= 20:
+        kind = "spray bot"
+        score = 2
+    elif age_h is not None and age_h < 6:
+        kind = "fresh / likely bot"
+        score = 2
+    elif age_h is not None and age_h >= 24 * 14 and n >= 8 and tokens < 20:
+        kind = "trader"
+        score = 4
+    if addr in KOL_BY_ADDR:
+        label = "follow"
+    elif score >= 4:
+        label = "follow"
+    elif score <= 2:
+        label = "ignore"
+    else:
+        label = "mixed"
+    age_s = "—"
+    if age_h is not None:
+        if age_h < 1:
+            age_s = f"{int(age_h * 60)}m"
+        elif age_h < 48:
+            age_s = f"{age_h:.1f}h"
+        else:
+            age_s = f"{int(age_h / 24)}d"
+    out = {
+        "t": time.time(),
+        "n": n,
+        "err": err,
+        "age": age_s,
+        "sol": bal,
+        "tokens": tokens,
+        "kind": kind,
+        "score": score,
+        "label": label,
+        "kol": KOL_BY_ADDR.get(addr),
+    }
+    wallet_cache[addr] = out
+    return out
+
+
+def grok_wallet(addr, prof, usd, ticker):
+    if not XAI_API_KEY:
+        return ""
+    prompt = (
+        "You grade Solana meme buyers.\n"
+        "ONLY two classes: (1) automated vol/chart bot  (2) discretionary trader.\n"
+        "Vol bot = high tx density, many token accounts, fresh wallet, "
+        "mechanical size, here to paint volume or hold the chart up.\n"
+        "Trader = older wallet, fewer bags, irregular timing, size looks chosen.\n"
+        "Do not invent PnL. If facts are thin, say unknown and score 3.\n"
+        f"wallet {addr}\n"
+        f"buy ${usd} of ${ticker}\n"
+        f"sampled_sigs {prof.get('n')} failed {prof.get('err')} "
+        f"wallet_age {prof.get('age')} sol {prof.get('sol')} "
+        f"token_accounts {prof.get('tokens')} "
+        f"heuristic {prof.get('kind')} {prof.get('score')}/5 "
+        f"kol {prof.get('kol') or 'no'}\n"
+        "Output exactly 4 lines:\n"
+        "1) X/5\n"
+        "2) vol bot OR trader\n"
+        "3) follow / ignore\n"
+        "4) one sentence why"
+    )
+    try:
+        r = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-4.3",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.05,
+            },
+            timeout=25,
+        )
+        data = r.json() or {}
+        return (
+            ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        )[:600]
+    except Exception:
+        return ""
+
+
+def format_wallet_field(addr, prof, grok_txt):
+    who = prof.get("kol") or prof.get("kind") or "wallet"
+    line = (
+        f"**{who}**  `{prof.get('score')}/5`  `{prof.get('label')}`\n"
+        f"type `{prof.get('kind')}`  age `{prof.get('age')}`  "
+        f"sol `{prof.get('sol'):.2f}`  txs `{prof.get('n')}`  bags `{prof.get('tokens')}`"
+    )
+    if grok_txt:
+        line += "\n" + grok_txt
+    return line[:1024]
+
+
 def grok_report(ticker, name, mint, stats, dist, smarts, fomo):
     if not XAI_API_KEY:
         return "no xAI key"
@@ -761,10 +928,13 @@ def ping_whales(mint, pos, stats):
     name = pos.get("name") or stats.get("name") or ticker
     calls = pump_callouts(mint)
     buys = whale_buys(pair, mint, WHALE_5M_USD)
-    for w in buys[:8]:
+    for w in buys[:5]:
         seen_trades.add(w["tx"])
         if len(seen_trades) > 4000:
             seen_trades.clear()
+        addr = w.get("wallet") or ""
+        prof = wallet_profile(addr)
+        gtxt = grok_wallet(addr, prof, w.get("usd"), ticker)
         extra = [
             {
                 "name": "Supply picked up",
@@ -772,7 +942,12 @@ def ping_whales(mint, pos, stats):
                     f"`{w['pct']:.4f}%`" if w.get("pct") is not None else "—"
                 ),
                 "inline": False,
-            }
+            },
+            {
+                "name": "Buyer",
+                "value": format_wallet_field(addr, prof, gtxt) or "—",
+                "inline": False,
+            },
         ]
         discord_embed(
             rick_embed(
