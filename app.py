@@ -77,46 +77,77 @@ def money(n):
 
 
 def rick_embed(kind, ticker, name, mint, body, stats, color):
+    title_name = name or ticker or mint[:6]
     px = stats.get("priceUsd") or "—"
-    fdv = money(stats.get("mc") or stats.get("fdv"))
-    liq = money(stats.get("liq"))
-    vol = money(stats.get("vol24"))
-    vol1 = money(stats.get("vol1"))
-    age = stats.get("ageHours")
-    age_s = f"{age:.0f}h" if isinstance(age, (int, float)) else "—"
     chg1 = stats.get("chg1")
-    chg1_s = f"{float(chg1):+.1f}%" if chg1 is not None else "—"
-    buys = stats.get("buys1") or stats.get("buys24") or "—"
-    sells = stats.get("sells1") or stats.get("sells24") or "—"
-    dex = stats.get("dex") or "dex"
+    try:
+        chg_n = float(chg1)
+    except (TypeError, ValueError):
+        chg_n = None
+    if chg_n is None:
+        arrow, chg_s = "•", "—"
+    elif chg_n >= 0:
+        arrow, chg_s, color = "▲", f"+{chg_n:.1f}%", 0x3BA55C
+    else:
+        arrow, chg_s, color = "▼", f"{chg_n:.1f}%", 0xED4245
+
     pair = stats.get("pairUrl") or f"https://dexscreener.com/solana/{mint}"
     axiom = f"https://axiom.trade/t/{mint}"
     photon = f"https://photon-sol.tinyastro.io/en/lp/{mint}"
     gmgn = f"https://gmgn.ai/sol/token/{mint}"
     pf = f"https://pump.fun/{mint}"
-    title_name = name or ticker or mint[:6]
-
-    desc = (
-        f"**{title_name}** · `{kind}` · {dex}\n"
-        f"USD: `{px}`\n"
-        f"MC: **{fdv}**\n"
-        f"Liq: **{liq}**\n"
-        f"Vol: **{vol}** · Age: **{age_s}**\n"
-        f"1H: **{vol1}** · {chg1_s}   buys `{buys}`  sells `{sells}`\n"
-        f"\n"
-        f"`{mint}`\n"
-        f"[AXI]({axiom}) · [PHO]({photon}) · [DEX]({pair}) · [GMGN]({gmgn}) · [PF]({pf})\n"
-    )
-    if body and body != "_tape only_":
-        desc += f"\n{body[:900]}"
+    dex = (stats.get("dex") or "dex").lower()
+    age = stats.get("ageHours")
+    age_s = f"{age}h" if age is not None else "—"
 
     embed = {
-        "title": str(title_name),
+        "author": {"name": f"SKYZ  ·  {kind}  ·  {dex}"},
+        "title": f"${ticker}" if ticker else title_name,
         "url": pair,
-        "description": desc[:3900],
+        "description": f"`{mint}`",
         "color": color,
-        "footer": {"text": f"{kind}  ·  SKYZ"},
+        "fields": [
+            {"name": "USD", "value": f"`{px}`", "inline": True},
+            {
+                "name": "MC",
+                "value": f"**{money(stats.get('mc') or stats.get('fdv'))}**",
+                "inline": True,
+            },
+            {"name": "Liq", "value": f"**{money(stats.get('liq'))}**", "inline": True},
+            {
+                "name": "Vol 24h",
+                "value": f"**{money(stats.get('vol24'))}**",
+                "inline": True,
+            },
+            {"name": "Age", "value": f"**{age_s}**", "inline": True},
+            {
+                "name": "1H",
+                "value": f"**{money(stats.get('vol1'))}**  {arrow} {chg_s}",
+                "inline": True,
+            },
+            {
+                "name": "Flow",
+                "value": (
+                    f"buys `{stats.get('buys1') or stats.get('buys24') or '—'}`   "
+                    f"sells `{stats.get('sells1') or stats.get('sells24') or '—'}`"
+                ),
+                "inline": False,
+            },
+            {
+                "name": "Trade",
+                "value": (
+                    f"[AXI]({axiom})   [PHO]({photon})   [DEX]({pair})   "
+                    f"[GMGN]({gmgn})   [PF]({pf})"
+                ),
+                "inline": False,
+            },
+        ],
+        "footer": {"text": title_name},
     }
+    if body:
+        embed["fields"].append(
+            {"name": "Desk", "value": str(body)[:1024], "inline": False}
+        )
     if stats.get("image"):
         embed["thumbnail"] = {"url": stats["image"]}
     return embed
