@@ -18,18 +18,20 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PUMP_JWT = os.environ.get("PUMP_JWT", "")
 
 SURGE_PCT = float(os.environ.get("SURGE_PCT", "12"))
-WHALE_5M_USD = float(os.environ.get("WHALE_5M_USD", "2500"))
+WHALE_5M_USD = float(os.environ.get("WHALE_5M_USD", "300"))
 POLL_SEC = int(os.environ.get("POLL_SEC", "45"))
 
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 WSOL = "So11111111111111111111111111111111111111112"
 PUMP_API = "https://frontend-api-v3.pump.fun"
+GECKO = "https://api.geckoterminal.com/api/v2"
 
 seen = set()
 grok_done = set()
 watch = {}
 last_whale_ping = {}
+seen_trades = set()
 
 KOLS = {
     "Cented": "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
@@ -50,6 +52,7 @@ KOLS = {
     "Publix": "86AEJExyjeNNgcp7GrAvCXTDicf5aGWgoERbXFiG1EdD",
     "Heyitsyolo": "Av3xWHJ5EsoLZag6pr7LKbrGgLRTaykXomDD5kBhL9YQ",
 }
+KOL_BY_ADDR = {v: k for k, v in KOLS.items()}
 
 PUMP_HDR = {
     "Accept": "application/json",
@@ -86,6 +89,40 @@ def helius_rpc(method, params):
         return {}
 
 
+def token_account_owner(token_acc):
+    try:
+        res = helius_rpc(
+            "getAccountInfo",
+            [token_acc, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        ) or {}
+        value = res.get("value") or {}
+        data = value.get("data")
+        if isinstance(data, dict):
+            info = ((data.get("parsed") or {}).get("info") or {})
+            return info.get("owner")
+    except Exception:
+        pass
+    return None
+
+
+def sol_px():
+    try:
+        r = requests.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{WSOL}",
+            timeout=10,
+        )
+        pairs = (r.json() or {}).get("pairs") or []
+        for p in pairs:
+            if p.get("chainId") != "solana":
+                continue
+            px = p.get("priceUsd")
+            if px:
+                return float(px)
+    except Exception:
+        pass
+    return 150.0
+
+
 def dex_stats(mint):
     out = {
         "ticker": "?",
@@ -100,6 +137,8 @@ def dex_stats(mint):
         "image": None,
         "dex": f"https://dexscreener.com/solana/{mint}",
         "pair": None,
+        "socials": [],
+        "boosts": 0,
     }
     try:
         r = requests.get(
@@ -130,6 +169,17 @@ def dex_stats(mint):
         out["image"] = info.get("imageUrl")
         out["dex"] = p.get("url") or out["dex"]
         out["pair"] = p.get("pairAddress")
+        out["boosts"] = int((p.get("boosts") or {}).get("active") or 0)
+        socials = []
+        for s in info.get("socials") or []:
+            url = s.get("url") if isinstance(s, dict) else None
+            if url:
+                socials.append(url)
+        for w in info.get("websites") or []:
+            url = w.get("url") if isinstance(w, dict) else w
+            if url:
+                socials.append(url)
+        out["socials"] = socials[:4]
         created = p.get("pairCreatedAt")
         if created:
             age_m = max(0, (time.time() * 1000 - created) / 60000)
@@ -170,9 +220,19 @@ def holder_dist(mint):
         rows = []
         for a in accs[:20]:
             amt = float((a.get("uiAmount")) or 0)
-            owner = a.get("address")
+            token_acc = a.get("address")
+            owner = token_account_owner(token_acc) or token_acc
             pct = (amt / supply * 100) if supply else 0
-            rows.append({"wallet": owner, "amt": amt, "pct": round(pct, 2)})
+            tag = KOL_BY_ADDR.get(owner)
+            rows.append(
+                {
+                    "wallet": owner,
+                    "ata": token_acc,
+                    "amt": amt,
+                    "pct": round(pct, 2),
+                    "tag": tag,
+                }
+            )
         dist["rows"] = rows
         if rows:
             dist["top1"] = round(rows[0]["pct"], 2)
@@ -237,10 +297,12 @@ def book_lines(dist, smarts):
     d20 = f"{dist.get('top20')}%" if dist.get("top20") is not None else "—"
     dist_s = f"T1 `{d1}`  T5 `{d5}`  T10 `{d10}`  T20 `{d20}`"
     if dist.get("rows"):
-        dist_s += "\n" + "\n".join(
-            f"`{r['wallet'][:4]}…{r['wallet'][-4:]}`  {r['pct']}%"
-            for r in dist["rows"][:4]
-        )
+        lines = []
+        for r in dist["rows"][:4]:
+            w = r["wallet"]
+            tag = f"  **{r['tag']}**" if r.get("tag") else ""
+            lines.append(f"`{w[:4]}…{w[-4:]}`  {r['pct']}%{tag}")
+        dist_s += "\n" + "\n".join(lines)
     if smarts:
         smart_s = "\n".join(
             f"**{s.get('name') or 'KOL'}**  `{s['wallet'][:4]}…{s['wallet'][-4:]}`"
@@ -275,6 +337,7 @@ def pump_coin(mint):
         "usd_mc": data.get("usd_market_cap"),
         "graduated": bool(data.get("complete")),
         "username": data.get("username") or "",
+        "creator": data.get("creator") or "",
         "desc": (data.get("description") or "")[:180],
     }
 
@@ -357,16 +420,71 @@ def fomo_line(stats, coin, replies, calls):
         5: "FOMO+",
     }.get(min(score, 5), "FOMO+")
     extra = "  graduated" if coin.get("graduated") else ""
-    return f"`{label}`  replies `{nrep}`  callouts `{ncall}`  5m {money(vol5)}{extra}"
+    creator = coin.get("username") or ""
+    cre = f"  by `{creator}`" if creator else ""
+    return f"`{label}`  replies `{nrep}`  callouts `{ncall}`  5m {money(vol5)}{extra}{cre}"
 
 
-def social_field(replies, calls):
+def social_field(replies, calls, stats, coin):
     parts = []
+    links = stats.get("socials") or []
+    if links:
+        parts.append(" · ".join(f"[link]({u})" for u in links[:4]))
+    if coin.get("creator"):
+        c = coin["creator"]
+        parts.append(f"creator `{c[:4]}…{c[-4:]}`")
     if calls:
         parts.append("**calls**\n" + "\n".join(calls[:4]))
     if replies:
         parts.append("**pump chat**\n" + "\n".join(replies[:4]))
-    return ("\n\n".join(parts) or "no pump chat / callouts")[:1024]
+    return ("\n".join(parts) or "no pump chat / callouts")[:1024]
+
+
+def whale_buys(pair, min_usd):
+    if not pair:
+        return []
+    try:
+        r = requests.get(
+            f"{GECKO}/networks/solana/pools/{pair}/trades",
+            params={"trade_volume_in_usd_greater_than": int(min_usd)},
+            headers={"Accept": "application/json"},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            return []
+        rows = (r.json() or {}).get("data") or []
+    except Exception:
+        return []
+    px = sol_px()
+    out = []
+    for row in rows:
+        attr = (row.get("attributes") or {}) if isinstance(row, dict) else {}
+        if (attr.get("kind") or "").lower() != "buy":
+            continue
+        usd = float(attr.get("volume_in_usd") or 0)
+        if usd < min_usd:
+            continue
+        tx = attr.get("tx_hash") or row.get("id")
+        if not tx or tx in seen_trades:
+            continue
+        wallet = attr.get("tx_from_address") or ""
+        from_amt = float(attr.get("from_token_amount") or 0)
+        from_px = float(attr.get("price_from_in_usd") or 0)
+        sol = None
+        if from_px and 50 <= from_px <= 800 and from_amt:
+            sol = from_amt
+        elif px:
+            sol = usd / px
+        out.append(
+            {
+                "tx": tx,
+                "wallet": wallet,
+                "usd": usd,
+                "sol": sol,
+                "name": KOL_BY_ADDR.get(wallet),
+            }
+        )
+    return out
 
 
 def grok_report(ticker, name, mint, stats, dist, smarts, fomo):
@@ -376,7 +494,7 @@ def grok_report(ticker, name, mint, stats, dist, smarts, fomo):
         f"Blunt 8-line Solana meme DD. No fluff.\n"
         f"Token ${ticker} {name}\nCA {mint}\n"
         f"MC {stats.get('mc')} liq {stats.get('liq')} vol24 {stats.get('vol24')} "
-        f"age {stats.get('age')} chg24 {stats.get('chg24')}\n"
+        f"age {stats.get('age')} chg24 {stats.get('chg24')} boosts {stats.get('boosts')}\n"
         f"FOMO {fomo}\n"
         f"Top holders T1/T5/T10/T20 {dist.get('top1')}/{dist.get('top5')}/"
         f"{dist.get('top10')}/{dist.get('top20')}\n"
@@ -422,10 +540,13 @@ def rick_embed(
     dex = stats.get("dex") or f"https://dexscreener.com/solana/{mint}"
     chg = stats.get("chg24")
     chg_s = f"{chg:+.1f}%" if isinstance(chg, (int, float)) else "—"
+    boost = stats.get("boosts") or 0
+    boost_s = f"   `BOOST` {boost}" if boost else ""
     block = (
+        f"`{mint}`\n"
         f"`MC` {money(stats.get('mc'))}   `LIQ` {money(stats.get('liq'))}\n"
         f"`VOL` {money(stats.get('vol24'))}   `5m` {money(stats.get('vol5'))}\n"
-        f"`PX` {stats.get('price') or '—'}   `24h` {chg_s}   `AGE` {stats.get('age') or '—'}"
+        f"`PX` {stats.get('price') or '—'}   `24h` {chg_s}   `AGE` {stats.get('age') or '—'}{boost_s}"
     )
     desc = f"{block}\n\n{body}".strip()[:3900]
     venues = (
@@ -480,7 +601,7 @@ def process_buy(mint, sig=None):
     replies = pump_replies(mint)
     calls = pump_callouts(mint)
     fomo = fomo_line(stats, coin, replies, calls)
-    social = social_field(replies, calls)
+    social = social_field(replies, calls, stats, coin)
     if first:
         body = grok_report(ticker, name, mint, stats, dist, smarts, fomo)
         grok_done.add(mint)
@@ -506,6 +627,7 @@ def process_buy(mint, sig=None):
     watch[mint] = {
         "ticker": ticker,
         "name": name,
+        "pair": stats.get("pair"),
         "entry_px": float(stats.get("price") or 0) or None,
         "last_px": float(stats.get("price") or 0) or None,
         "t": time.time(),
@@ -567,12 +689,36 @@ def test():
     return jsonify({"ok": True, "mint": mint})
 
 
+def format_whale(w):
+    who = w.get("name") or "wallet"
+    addr = w.get("wallet") or "?"
+    sol = w.get("sol")
+    sol_s = f"{sol:.2f} SOL" if sol else "—"
+    solscan = f"https://solscan.io/account/{addr}" if addr != "?" else ""
+    tx = w.get("tx") or ""
+    tx_s = f"https://solscan.io/tx/{tx}" if tx else ""
+    line = (
+        f"**{who}** bought `{money(w.get('usd'))}`  (`{sol_s}`)\n"
+        f"`{addr}`"
+    )
+    links = []
+    if solscan:
+        links.append(f"[wallet]({solscan})")
+    if tx_s:
+        links.append(f"[tx]({tx_s})")
+    if links:
+        line += "\n" + " · ".join(links)
+    return line
+
+
 def poll_positions():
     while True:
         time.sleep(POLL_SEC)
         now = time.time()
         for mint, pos in list(watch.items()):
             stats = dex_stats(mint)
+            if stats.get("pair"):
+                pos["pair"] = stats["pair"]
             px = float(stats.get("price") or 0) or None
             if not px:
                 continue
@@ -581,7 +727,6 @@ def poll_positions():
             pos["last_px"] = px
             chg = ((px - last) / last * 100) if last else 0
             from_entry = ((px - entry) / entry * 100) if entry else 0
-            vol5 = float(stats.get("vol5") or 0)
             ticker = pos.get("ticker") or stats.get("ticker") or "?"
             name = pos.get("name") or stats.get("name") or ticker
             if abs(chg) >= SURGE_PCT:
@@ -600,19 +745,23 @@ def poll_positions():
                         "—",
                     )
                 )
-            if vol5 >= WHALE_5M_USD and now - last_whale_ping.get(mint, 0) > 180:
-                last_whale_ping[mint] = now
+            buys = whale_buys(pos.get("pair") or stats.get("pair"), WHALE_5M_USD)
+            for w in buys[:5]:
+                seen_trades.add(w["tx"])
+                if len(seen_trades) > 4000:
+                    seen_trades.clear()
+                label = w.get("name") or "whale"
                 discord_embed(
                     rick_embed(
                         "whale tape",
                         ticker,
                         name,
                         mint,
-                        f"5m vol {money(vol5)}",
+                        format_whale(w),
                         stats,
                         0xF5C542,
                         "live book",
-                        "—",
+                        label,
                     )
                 )
             calls = pump_callouts(mint)
