@@ -13,7 +13,7 @@ WALLET = os.environ["WALLET"].strip()
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"].strip()
 HELIUS_API_KEY = os.environ["HELIUS_API_KEY"].strip()
 XAI_API_KEY = os.environ["XAI_API_KEY"].strip()
-XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.6")
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.3")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 MIN_SOL = float(os.environ.get("MIN_SOL", "0.03"))
 PORT = int(os.environ.get("PORT", "8080"))
@@ -62,23 +62,15 @@ def discord(content=None, embeds=None):
     requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=20)
 
 
-def card(title, desc, fields, color=0x57F287):
-    return {
-        "title": title,
-        "description": desc,
-        "color": color,
-        "fields": [{"name": n, "value": str(v)[:1024], "inline": True} for n, v in fields],
-    }
-
-    def money(n):
+def money(n):
     try:
         n = float(n)
     except (TypeError, ValueError):
         return "—"
     if n >= 1_000_000:
-        return f"${n/1_000_000:.2f}M"
+        return f"${n / 1_000_000:.2f}M"
     if n >= 1_000:
-        return f"${n/1_000:.1f}K"
+        return f"${n / 1_000:.1f}K"
     if n >= 1:
         return f"${n:.2f}"
     return f"${n:.6f}".rstrip("0")
@@ -128,10 +120,14 @@ def dex_stats(mint):
     r.raise_for_status()
     pairs = r.json() or []
     if not pairs:
-        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=15)
+        r = requests.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=15
+        )
         pairs = (r.json() or {}).get("pairs") or []
     sol = [p for p in pairs if p.get("chainId") == "solana"] or pairs
-    sol.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
+    sol.sort(
+        key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True
+    )
     p = sol[0] if sol else {}
     base = p.get("baseToken") or {}
     created = p.get("pairCreatedAt")
@@ -140,7 +136,7 @@ def dex_stats(mint):
         age_h = (time.time() * 1000 - created) / 3_600_000
     vol = p.get("volume") or {}
     tx = p.get("txns") or {}
-        info = p.get("info") or {}
+    info = p.get("info") or {}
     chg = (p.get("priceChange") or {}).get("h24")
     return {
         "name": base.get("name"),
@@ -156,12 +152,12 @@ def dex_stats(mint):
         "buys24": (tx.get("h24") or {}).get("buys"),
         "sells24": (tx.get("h24") or {}).get("sells"),
         "dex": p.get("dexId"),
+        "image": info.get("imageUrl"),
+        "chg24": chg,
         "pairUrl": p.get("url"),
         "ageHours": round(age_h, 2) if age_h is not None else None,
         "pairCreatedAt": created,
         "rawPairCount": len(sol),
-        "image": info.get("imageUrl"),
-        "chg24": chg,
     }
 
 
@@ -298,6 +294,7 @@ def process_buy(buy):
 
     remember(mint, stats)
     ticker = stats.get("symbol") or mint[:6]
+    name = stats.get("name") or ticker
 
     report = None
     if mint not in grok_done:
@@ -307,25 +304,10 @@ def process_buy(buy):
         except Exception:
             report = None
 
-    desc = report[:1800] if report else "Tape only. Grok already used on this CA or API failed."
-    if mint in grok_done and report is None and key.endswith("manual-test"):
-        desc = "Tape only. Grok API failed."
-    embed = card(
-        f"${ticker}  ·  new bag",
-        f"`{mint}`\n{desc}",
-        [
-            ("Spent", f"{buy.get('solSpent', 0):.3f} SOL"),
-            ("MC", f"${stats.get('mc')}"),
-            ("Liq", f"${stats.get('liq')}"),
-            ("Vol 24h", f"${stats.get('vol24')}"),
-            ("Age", f"{stats.get('ageHours')}h"),
-            ("Dex", stats.get("dex") or "—"),
-        ],
-    )
-       name = stats.get("name") or ticker
     body = report[:1600] if report else "_tape only_"
     embed = rick_embed("new bag", ticker, name, mint, body, stats, 0x00C2A8)
     discord(embeds=[embed])
+
 
 def handle_payload(payload):
     for buy in extract_buys(payload):
@@ -350,40 +332,30 @@ def poll_positions():
             if last and px:
                 chg = (px - last) / last * 100
                 if abs(chg) >= SURGE_PCT:
-                    color = 0x57F287 if chg > 0 else 0xED4245
-                    kind = "surge" if chg > 0 else "dump"
-                    discord(
-                        embeds=[
-                            card(
-                                f"${ticker}  ·  {kind}",
-                                f"`{mint}`",
-                                [
-                                    ("Move", f"{chg:+.1f}%"),
-                                    ("MC", f"${mc:,.0f}" if mc else "—"),
-                                    ("Px", f"${px}"),
-                                    ("5m vol", f"${vol5:,.0f}"),
-                                ],
-                                color=color,
-                            )
-                        ]
+                    embed = rick_embed(
+                        "surge" if chg > 0 else "dump",
+                        ticker,
+                        s.get("name") or ticker,
+                        mint,
+                        f"{chg:+.1f}% since last tick",
+                        s,
+                        0x3BA55C if chg > 0 else 0xED4245,
                     )
+                    discord(embeds=[embed])
 
             last_w = last_whale_ping.get(mint, 0)
             if vol5 >= WHALE_5M_USD and now - last_w > 90:
                 last_whale_ping[mint] = now
-                discord(
-                    embeds=[
-                        card(
-                            f"${ticker}  ·  size on tape",
-                            f"`{mint}`\n5m volume ${vol5:,.0f} · buys {s.get('buys5')}",
-                            [
-                                ("MC", f"${mc:,.0f}" if mc else "—"),
-                                ("Px", f"${px}"),
-                            ],
-                            color=0xFEE75C,
-                        )
-                    ]
+                embed = rick_embed(
+                    "size on tape",
+                    ticker,
+                    s.get("name") or ticker,
+                    mint,
+                    f"5m vol {money(vol5)} · buys {s.get('buys5')}",
+                    s,
+                    0xFEE75C,
                 )
+                discord(embeds=[embed])
 
             pos["last_px"] = px
             pos["last_mc"] = mc
