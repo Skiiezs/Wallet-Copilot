@@ -28,6 +28,7 @@ IGNORE_MINTS = {
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB",
 }
+HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 app = Flask(__name__)
 seen = set()
@@ -43,12 +44,12 @@ Cover:
 1. What it is (name, age, narrative guess, clone risk)
 2. Live stats from the data packet
 3. Contract / book risk if data exists; say UNKNOWN if missing
-4. Holder profitability: early vs late cohort given age + vol/MC
+4. Holder profitability and supply concentration from the packet
 5. Market-made / bundled / KOL-farm vs organic
 6. Verdict: hold / trim / exit
 7. Kill conditions
 
-Do not invent holder % or dev % if not in the packet.
+Do not invent holder % or wallet PnL if not in the packet.
 Keep it under 500 words. Discord markdown. No links.
 """
 
@@ -67,16 +68,161 @@ def money(n):
         n = float(n)
     except (TypeError, ValueError):
         return "—"
-    if n >= 1_000_000:
+    if abs(n) >= 1_000_000:
         return f"${n / 1_000_000:.2f}M"
-    if n >= 1_000:
+    if abs(n) >= 1_000:
         return f"${n / 1_000:.1f}K"
-    if n >= 1:
+    if abs(n) >= 1:
         return f"${n:.2f}"
     return f"${n:.6f}".rstrip("0")
 
 
-def rick_embed(kind, ticker, name, mint, body, stats, color):
+def helius_rpc(method, params):
+    r = requests.post(
+        HELIUS_RPC,
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return (r.json() or {}).get("result")
+
+
+def supply_distribution(mint):
+    """Top holder % from on-chain largest accounts. Not tagged smart money."""
+    out = {
+        "top1": None,
+        "top5": None,
+        "top10": None,
+        "top20": None,
+        "rows": [],
+        "error": None,
+    }
+    try:
+        supply_res = helius_rpc("getTokenSupply", [mint]) or {}
+        supply = float((supply_res.get("value") or {}).get("uiAmount") or 0)
+        largest = helius_rpc("getTokenLargestAccounts", [mint]) or {}
+        accs = (largest.get("value") or [])[:20]
+        amounts = [float(a.get("uiAmount") or 0) for a in accs]
+        addrs = [a.get("address") for a in accs if a.get("address")]
+        owners = {}
+        if addrs:
+            info = helius_rpc(
+                "getMultipleAccounts",
+                [addrs, {"encoding": "jsonParsed"}],
+            ) or {}
+            for i, acc in enumerate(info.get("value") or []):
+                if not acc:
+                    continue
+                parsed = ((acc.get("data") or {}).get("parsed") or {}).get("info") or {}
+                owners[addrs[i]] = parsed.get("owner") or addrs[i]
+        if supply > 0 and amounts:
+            def pct(n):
+                return round(sum(amounts[:n]) / supply * 100, 1)
+
+            out["top1"] = pct(1)
+            out["top5"] = pct(5)
+            out["top10"] = pct(min(10, len(amounts)))
+            out["top20"] = pct(min(20, len(amounts)))
+            for i, a in enumerate(accs[:5]):
+                owner = owners.get(a.get("address"), a.get("address") or "?")
+                share = round(float(a.get("uiAmount") or 0) / supply * 100, 1)
+                out["rows"].append({"wallet": owner, "pct": share})
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def smart_wallets(mint):
+    """Best-effort GMGN top traders still holding with profit. Fail soft."""
+    url = (
+        f"https://gmgn.ai/vas/api/v1/token_traders"
+        f"?chain=sol&address={mint}&order_by=profit&direction=desc&limit=8"
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": f"https://gmgn.ai/sol/token/{mint}",
+    }
+    rows = []
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            url2 = f"https://gmgn.ai/defi/quotation/v1/tokens/top_traders/sol/{mint}"
+            r = requests.get(url2, headers=headers, timeout=15)
+        data = r.json() if r.status_code == 200 else {}
+        traders = (
+            data.get("data")
+            or (data.get("data") or {}).get("list")
+            or data.get("list")
+            or []
+        )
+        if isinstance(traders, dict):
+            traders = traders.get("list") or traders.get("traders") or []
+        for t in traders[:6]:
+            if not isinstance(t, dict):
+                continue
+            addr = (
+                t.get("address")
+                or t.get("wallet_address")
+                or t.get("account")
+                or ""
+            )
+            pnl = t.get("profit") or t.get("realized_profit") or t.get("pnl")
+            hold = t.get("unrealized_profit") or t.get("hold")
+            bal_pct = (
+                t.get("amount_percentage")
+                or t.get("token_percentage")
+                or t.get("share")
+            )
+            try:
+                pnl_n = float(pnl)
+            except (TypeError, ValueError):
+                pnl_n = None
+            if pnl_n is not None and pnl_n <= 0:
+                continue
+            if not addr:
+                continue
+            rows.append(
+                {
+                    "wallet": addr,
+                    "pnl": pnl_n,
+                    "hold": hold,
+                    "pct": bal_pct,
+                    "tag": ",".join(t.get("tags") or t.get("tag") or [])
+                    if isinstance(t.get("tags") or t.get("tag"), list)
+                    else (t.get("tag") or ""),
+                }
+            )
+    except Exception:
+        return []
+    return rows[:5]
+
+
+def book_lines(dist, smarts):
+    d1 = f"{dist.get('top1')}%" if dist.get("top1") is not None else "—"
+    d5 = f"{dist.get('top5')}%" if dist.get("top5") is not None else "—"
+    d10 = f"{dist.get('top10')}%" if dist.get("top10") is not None else "—"
+    d20 = f"{dist.get('top20')}%" if dist.get("top20") is not None else "—"
+    dist_s = f"T1 `{d1}`  T5 `{d5}`  T10 `{d10}`  T20 `{d20}`"
+    if dist.get("rows"):
+        tops = "\n".join(
+            f"`{r['wallet'][:4]}…{r['wallet'][-4:]}`  {r['pct']}%"
+            for r in dist["rows"][:4]
+        )
+        dist_s += f"\n{tops}"
+
+    if smarts:
+        smart_s = "\n".join(
+            f"`{s['wallet'][:4]}…{s['wallet'][-4:]}`  PnL {money(s['pnl'])}"
+            + (f"  {s['tag']}" if s.get("tag") else "")
+            for s in smarts
+        )
+    else:
+        smart_s = "no live PnL feed (GMGN blocked). open GMGN holders."
+    return dist_s[:1024], smart_s[:1024]
+
+
+def rick_embed(kind, ticker, name, mint, body, stats, color, dist=None, smarts=None):
     title_name = name or ticker or mint[:6]
     px = stats.get("priceUsd") or "—"
     chg1 = stats.get("chg1")
@@ -99,6 +245,7 @@ def rick_embed(kind, ticker, name, mint, body, stats, color):
     dex = (stats.get("dex") or "dex").lower()
     age = stats.get("ageHours")
     age_s = f"{age}h" if age is not None else "—"
+    dist_s, smart_s = book_lines(dist or {}, smarts or [])
 
     embed = {
         "author": {"name": f"SKYZ  ·  {kind}  ·  {dex}"},
@@ -133,6 +280,8 @@ def rick_embed(kind, ticker, name, mint, body, stats, color):
                 ),
                 "inline": False,
             },
+            {"name": "Supply", "value": dist_s, "inline": False},
+            {"name": "Smart in", "value": smart_s, "inline": False},
             {
                 "name": "Trade",
                 "value": (
@@ -205,7 +354,7 @@ def dex_stats(mint):
 
 def helius_asset(mint):
     r = requests.post(
-        f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
+        HELIUS_RPC,
         json={
             "jsonrpc": "2.0",
             "id": 1,
@@ -273,11 +422,13 @@ def extract_buys(payload):
     return buys
 
 
-def grok_report(buy, stats, asset):
+def grok_report(buy, stats, asset, dist, smarts):
     packet = {
         "wallet": WALLET,
         "buy": buy,
         "dexscreener": stats,
+        "distribution": dist,
+        "smartWallets": smarts,
         "heliusAsset": {
             "id": asset.get("id"),
             "content": (asset.get("content") or {}).get("metadata"),
@@ -300,7 +451,7 @@ def grok_report(buy, stats, asset):
                 {
                     "role": "user",
                     "content": "Wallet just bought this token. Write the diagnostic.\n\n"
-                    + json.dumps(packet, default=str)[:12000],
+                    + json.dumps(packet, default=str)[:14000],
                 },
             ],
         },
@@ -333,6 +484,8 @@ def process_buy(buy):
         asset = helius_asset(mint)
     except Exception as e:
         asset = {"error": str(e)}
+    dist = supply_distribution(mint)
+    smarts = smart_wallets(mint)
 
     remember(mint, stats)
     ticker = stats.get("symbol") or mint[:6]
@@ -341,13 +494,15 @@ def process_buy(buy):
     report = None
     if mint not in grok_done:
         try:
-            report = grok_report(buy, stats, asset)
+            report = grok_report(buy, stats, asset, dist, smarts)
             grok_done.add(mint)
         except Exception:
             report = None
 
     body = report[:900] if report else ""
-    embed = rick_embed("new bag", ticker, name, mint, body, stats, 0x5865F2)
+    embed = rick_embed(
+        "new bag", ticker, name, mint, body, stats, 0x5865F2, dist, smarts
+    )
     discord(embeds=[embed])
 
 
