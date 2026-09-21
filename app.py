@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+from datetime import datetime
 
 import requests
 from flask import Flask, jsonify, request
@@ -18,7 +19,7 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PUMP_JWT = os.environ.get("PUMP_JWT", "")
 
 SURGE_PCT = float(os.environ.get("SURGE_PCT", "12"))
-WHALE_5M_USD = float(os.environ.get("WHALE_5M_USD", "300"))
+WHALE_5M_USD = float(os.environ.get("WHALE_5M_USD", "250"))
 POLL_SEC = int(os.environ.get("POLL_SEC", "8"))
 
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -311,7 +312,7 @@ def book_lines(dist, smarts):
     d5 = f"{dist.get('top5')}%" if dist.get("top5") is not None else "—"
     d10 = f"{dist.get('top10')}%" if dist.get("top10") is not None else "—"
     d20 = f"{dist.get('top20')}%" if dist.get("top20") is not None else "—"
-    dist_s = f"T1 `{d1}`  T5 `{d5}`  T10 `{d10}`  T20 `{d20}`"
+    dist_s = f"T1 `{d1}` · T5 `{d5}` · T10 `{d10}` · T20 `{d20}`"
     if dist.get("rows"):
         lines = []
         for r in dist["rows"][:4]:
@@ -321,7 +322,7 @@ def book_lines(dist, smarts):
         dist_s += "\n" + "\n".join(lines)
     if smarts:
         smart_s = "\n".join(
-            f"**{s.get('name') or 'KOL'}**  `{s['wallet'][:4]}…{s['wallet'][-4:]}`"
+            f"👑 **{s.get('name') or 'KOL'}**  `{s['wallet'][:4]}…{s['wallet'][-4:]}`"
             for s in smarts[:8]
         )
     else:
@@ -435,10 +436,10 @@ def fomo_line(stats, coin, replies, calls):
         4: "FOMO",
         5: "FOMO+",
     }.get(min(score, 5), "FOMO+")
-    extra = "  graduated" if coin.get("graduated") else ""
+    extra = "  · 🎓 graduated" if coin.get("graduated") else ""
     creator = coin.get("username") or ""
-    cre = f"  by `{creator}`" if creator else ""
-    return f"`{label}`  replies `{nrep}`  callouts `{ncall}`  5m {money(vol5)}{extra}{cre}"
+    cre = f"  · 👤 `{creator}`" if creator else ""
+    return f"`{label}`  ·  💬 `{nrep}`  ·  📣 `{ncall}`  ·  5m {money(vol5)}{extra}{cre}"
 
 
 def social_field(replies, calls, stats, coin):
@@ -448,15 +449,24 @@ def social_field(replies, calls, stats, coin):
         parts.append(" · ".join(f"[link]({u})" for u in links[:4]))
     if coin.get("creator"):
         c = coin["creator"]
-        parts.append(f"creator `{c[:4]}…{c[-4:]}`")
+        parts.append(f"👤 creator `{c[:4]}…{c[-4:]}`")
     if calls:
-        parts.append("**calls**\n" + "\n".join(calls[:4]))
+        parts.append("📣 **calls**\n" + "\n".join(calls[:4]))
     if replies:
-        parts.append("**pump chat**\n" + "\n".join(replies[:4]))
-    return ("\n".join(parts) or "no pump chat / callouts")[:1024]
+        parts.append("💬 **pump chat**\n" + "\n".join(replies[:4]))
+    return ("\n".join(parts) or "quiet")[:1024]
 
 
-def whale_buys(pair, mint, min_usd):
+def parse_trade_ts(ts):
+    if not ts:
+        return time.time()
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return time.time()
+
+
+def whale_buys(pair, mint, min_usd, cutoff=None):
     if not pair:
         return []
     try:
@@ -480,6 +490,9 @@ def whale_buys(pair, mint, min_usd):
             continue
         usd = float(attr.get("volume_in_usd") or 0)
         if usd < min_usd:
+            continue
+        tbuy = parse_trade_ts(attr.get("block_timestamp"))
+        if cutoff and tbuy < cutoff - 120:
             continue
         tx = attr.get("tx_hash") or row.get("id")
         if not tx or tx in seen_trades:
@@ -655,11 +668,13 @@ def grok_wallet(addr, prof, usd, ticker):
 
 
 def format_wallet_field(addr, prof, grok_txt):
+    icon = "👑" if prof.get("kol") else ("🤖" if "bot" in str(prof.get("kind")) else "🧑‍💻")
     who = prof.get("kol") or prof.get("kind") or "wallet"
+    stars = "⭐" * int(prof.get("score") or 0)
     line = (
-        f"**{who}**  `{prof.get('score')}/5`  `{prof.get('label')}`\n"
-        f"type `{prof.get('kind')}`  age `{prof.get('age')}`  "
-        f"sol `{prof.get('sol'):.2f}`  txs `{prof.get('n')}`  bags `{prof.get('tokens')}`"
+        f"{icon} **{who}**   {stars}  `{prof.get('score')}/5`  ·  `{prof.get('label')}`\n"
+        f"🎂 `{prof.get('age')}`   ◎ `{prof.get('sol'):.2f}` SOL   "
+        f"🧾 `{prof.get('n')}` txs   🎒 `{prof.get('tokens')}`"
     )
     if grok_txt:
         line += "\n" + grok_txt
@@ -714,6 +729,16 @@ def venues_line(stats, mint):
     )
 
 
+def kind_title(kind):
+    return {
+        "first scan": "🆕  first scan",
+        "add": "➕  add",
+        "Whale Purchase": "🐋  Whale Purchase",
+        "surge": "📈  surge",
+        "pump call": "📣  pump call",
+    }.get(kind, kind)
+
+
 def rick_embed(
     kind,
     ticker,
@@ -732,29 +757,30 @@ def rick_embed(
     chg = stats.get("chg24")
     chg_s = f"{chg:+.1f}%" if isinstance(chg, (int, float)) else "—"
     boost = stats.get("boosts") or 0
-    boost_s = f"   `BOOST` {boost}" if boost else ""
+    boost_s = f"   🚀 `{boost}`" if boost else ""
     block = (
         f"`{mint}`\n"
-        f"`MC` {money(stats.get('mc'))}   `LIQ` {money(stats.get('liq'))}\n"
-        f"`VOL` {money(stats.get('vol24'))}   `5m` {money(stats.get('vol5'))}\n"
-        f"`PX` {stats.get('price') or '—'}   `24h` {chg_s}   `AGE` {stats.get('age') or '—'}{boost_s}"
+        f"💰 `{money(stats.get('mc'))}`   💧 `{money(stats.get('liq'))}`   "
+        f"📊 `{money(stats.get('vol24'))}`\n"
+        f"⏱ 5m `{money(stats.get('vol5'))}`   💵 `{stats.get('price') or '—'}`   "
+        f"📉 `{chg_s}`   ⏳ `{stats.get('age') or '—'}`{boost_s}"
     )
     desc = f"{block}\n\n{body}".strip()[:3900]
     fields = []
     if extra_fields:
         fields.extend(extra_fields)
     if fomo and fomo not in ("—",):
-        fields.append({"name": "FOMO", "value": fomo, "inline": False})
+        fields.append({"name": "🔥 FOMO", "value": fomo, "inline": False})
     if social and social not in ("—",):
-        fields.append({"name": "Pump", "value": social, "inline": False})
+        fields.append({"name": "💬 Pump", "value": social, "inline": False})
     if dist_s and dist_s not in ("—", "live book"):
-        fields.append({"name": "Supply", "value": dist_s, "inline": False})
+        fields.append({"name": "📊 Supply", "value": dist_s, "inline": False})
     if smart_s and smart_s not in ("—", "whale", "live book"):
-        fields.append({"name": "KOLs in", "value": smart_s, "inline": False})
-    fields.append({"name": "Venues", "value": venues_line(stats, mint), "inline": False})
+        fields.append({"name": "👑 KOLs", "value": smart_s, "inline": False})
+    fields.append({"name": "🔗 Trade", "value": venues_line(stats, mint), "inline": False})
     embed = {
         "author": {"name": "SKYZ  ·  scan"},
-        "title": f"${ticker}   {kind}",
+        "title": f"${ticker}   {kind_title(kind)}",
         "url": dex,
         "description": desc,
         "color": color,
@@ -910,8 +936,8 @@ def format_whale(w):
         pct_s = f"{pct:.4f}%"
     tx = w.get("tx") or ""
     return (
-        f"**{who}** bought `{money(w.get('usd'))}` (`{sol_s}`)\n"
-        f"picked up `{pct_s}` of supply\n"
+        f"🛒 **{who}** bought `{money(w.get('usd'))}`  ·  `{sol_s}`\n"
+        f"📦 picked up `{pct_s}` of supply\n"
         f"`{addr}`\n"
         f"https://solscan.io/account/{addr}\n"
         + (f"https://solscan.io/tx/{tx}" if tx else "")
@@ -927,7 +953,7 @@ def ping_whales(mint, pos, stats):
     ticker = pos.get("ticker") or stats.get("ticker") or "?"
     name = pos.get("name") or stats.get("name") or ticker
     calls = pump_callouts(mint)
-    buys = whale_buys(pair, mint, WHALE_5M_USD)
+    buys = whale_buys(pair, mint, WHALE_5M_USD, cutoff=pos.get("t"))
     for w in buys[:5]:
         seen_trades.add(w["tx"])
         if len(seen_trades) > 4000:
@@ -937,14 +963,16 @@ def ping_whales(mint, pos, stats):
         gtxt = grok_wallet(addr, prof, w.get("usd"), ticker)
         extra = [
             {
-                "name": "Supply picked up",
+                "name": "📦 This buy",
                 "value": (
-                    f"`{w['pct']:.4f}%`" if w.get("pct") is not None else "—"
+                    f"`{w['pct']:.4f}%` of supply"
+                    if w.get("pct") is not None
+                    else "—"
                 ),
                 "inline": False,
             },
             {
-                "name": "Buyer",
+                "name": "🧠 Buyer",
                 "value": format_wallet_field(addr, prof, gtxt) or "—",
                 "inline": False,
             },
