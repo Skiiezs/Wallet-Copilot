@@ -105,6 +105,14 @@ def token_account_owner(token_acc):
     return None
 
 
+def token_supply(mint):
+    try:
+        res = helius_rpc("getTokenSupply", [mint]) or {}
+        return float(((res.get("value") or {}).get("uiAmount")) or 0)
+    except Exception:
+        return 0.0
+
+
 def sol_px():
     try:
         r = requests.get(
@@ -215,8 +223,7 @@ def holder_dist(mint):
             [mint, {"commitment": "confirmed"}],
         ) or {}
         accs = res.get("value") or []
-        supply_res = helius_rpc("getTokenSupply", [mint]) or {}
-        supply = float(((supply_res.get("value") or {}).get("uiAmount")) or 0)
+        supply = token_supply(mint)
         rows = []
         for a in accs[:20]:
             amt = float((a.get("uiAmount")) or 0)
@@ -440,7 +447,7 @@ def social_field(replies, calls, stats, coin):
     return ("\n".join(parts) or "no pump chat / callouts")[:1024]
 
 
-def whale_buys(pair, min_usd):
+def whale_buys(pair, mint, min_usd):
     if not pair:
         return []
     try:
@@ -456,6 +463,7 @@ def whale_buys(pair, min_usd):
     except Exception:
         return []
     px = sol_px()
+    supply = token_supply(mint)
     out = []
     for row in rows:
         attr = (row.get("attributes") or {}) if isinstance(row, dict) else {}
@@ -469,18 +477,22 @@ def whale_buys(pair, min_usd):
             continue
         wallet = attr.get("tx_from_address") or ""
         from_amt = float(attr.get("from_token_amount") or 0)
+        to_amt = float(attr.get("to_token_amount") or 0)
         from_px = float(attr.get("price_from_in_usd") or 0)
         sol = None
         if from_px and 50 <= from_px <= 800 and from_amt:
             sol = from_amt
         elif px:
             sol = usd / px
+        pct = (to_amt / supply * 100) if supply and to_amt else None
         out.append(
             {
                 "tx": tx,
                 "wallet": wallet,
                 "usd": usd,
                 "sol": sol,
+                "tokens": to_amt,
+                "pct": pct,
                 "name": KOL_BY_ADDR.get(wallet),
             }
         )
@@ -524,6 +536,17 @@ def grok_report(ticker, name, mint, stats, dist, smarts, fomo):
         return f"grok fail {e}"
 
 
+def venues_line(stats, mint):
+    dex = stats.get("dex") or f"https://dexscreener.com/solana/{mint}"
+    return (
+        f"[Axiom](https://axiom.trade/t/{mint}) · "
+        f"[Photon](https://photon-sol.tinyastro.io/en/lp/{mint}) · "
+        f"[Dex]({dex}) · "
+        f"[GMGN](https://gmgn.ai/sol/token/{mint}) · "
+        f"[Pump](https://pump.fun/coin/{mint})"
+    )
+
+
 def rick_embed(
     kind,
     ticker,
@@ -532,10 +555,11 @@ def rick_embed(
     body,
     stats,
     color,
-    dist_s,
-    smart_s,
+    dist_s="",
+    smart_s="",
     fomo="",
     social="",
+    extra_fields=None,
 ):
     dex = stats.get("dex") or f"https://dexscreener.com/solana/{mint}"
     chg = stats.get("chg24")
@@ -549,13 +573,18 @@ def rick_embed(
         f"`PX` {stats.get('price') or '—'}   `24h` {chg_s}   `AGE` {stats.get('age') or '—'}{boost_s}"
     )
     desc = f"{block}\n\n{body}".strip()[:3900]
-    venues = (
-        f"[Axiom](https://axiom.trade/t/{mint}) · "
-        f"[Photon](https://photon-sol.tinyastro.io/en/lp/{mint}) · "
-        f"[Dex]({dex}) · "
-        f"[GMGN](https://gmgn.ai/sol/token/{mint}) · "
-        f"[Pump](https://pump.fun/coin/{mint})"
-    )
+    fields = []
+    if extra_fields:
+        fields.extend(extra_fields)
+    if fomo and fomo not in ("—",):
+        fields.append({"name": "FOMO", "value": fomo, "inline": False})
+    if social and social not in ("—",):
+        fields.append({"name": "Pump", "value": social, "inline": False})
+    if dist_s and dist_s not in ("—", "live book"):
+        fields.append({"name": "Supply", "value": dist_s, "inline": False})
+    if smart_s and smart_s not in ("—", "whale", "live book"):
+        fields.append({"name": "KOLs in", "value": smart_s, "inline": False})
+    fields.append({"name": "Venues", "value": venues_line(stats, mint), "inline": False})
     embed = {
         "author": {"name": "SKYZ  ·  scan"},
         "title": f"${ticker}   {kind}",
@@ -563,13 +592,7 @@ def rick_embed(
         "description": desc,
         "color": color,
         "footer": {"text": f"{name} · {mint[:6]}…{mint[-4:]}"},
-        "fields": [
-            {"name": "FOMO", "value": fomo or "—", "inline": False},
-            {"name": "Pump", "value": social or "—", "inline": False},
-            {"name": "Supply", "value": dist_s or "—", "inline": False},
-            {"name": "KOLs in", "value": smart_s or "—", "inline": False},
-            {"name": "Venues", "value": venues, "inline": False},
-        ],
+        "fields": fields,
     }
     if stats.get("image"):
         embed["thumbnail"] = {"url": stats["image"]}
@@ -618,8 +641,8 @@ def process_buy(mint, sig=None):
             body,
             stats,
             color,
-            dist_s,
-            smart_s,
+            dist_s=dist_s,
+            smart_s=smart_s,
             fomo=fomo,
             social=social,
         )
@@ -694,21 +717,21 @@ def format_whale(w):
     addr = w.get("wallet") or "?"
     sol = w.get("sol")
     sol_s = f"{sol:.2f} SOL" if sol else "—"
-    solscan = f"https://solscan.io/account/{addr}" if addr != "?" else ""
+    pct = w.get("pct")
+    if pct is None:
+        pct_s = "unknown"
+    elif pct >= 0.01:
+        pct_s = f"{pct:.2f}%"
+    else:
+        pct_s = f"{pct:.4f}%"
     tx = w.get("tx") or ""
-    tx_s = f"https://solscan.io/tx/{tx}" if tx else ""
-    line = (
-        f"**{who}** bought `{money(w.get('usd'))}`  (`{sol_s}`)\n"
-        f"`{addr}`"
+    return (
+        f"**{who}** bought `{money(w.get('usd'))}` (`{sol_s}`)\n"
+        f"picked up `{pct_s}` of supply\n"
+        f"`{addr}`\n"
+        f"https://solscan.io/account/{addr}\n"
+        + (f"https://solscan.io/tx/{tx}" if tx else "")
     )
-    links = []
-    if solscan:
-        links.append(f"[wallet]({solscan})")
-    if tx_s:
-        links.append(f"[tx]({tx_s})")
-    if links:
-        line += "\n" + " · ".join(links)
-    return line
 
 
 def poll_positions():
@@ -741,30 +764,39 @@ def poll_positions():
                         body,
                         stats,
                         color,
-                        "live book",
-                        "—",
                     )
                 )
-            buys = whale_buys(pos.get("pair") or stats.get("pair"), WHALE_5M_USD)
+            calls = pump_callouts(mint)
+            buys = whale_buys(pos.get("pair") or stats.get("pair"), mint, WHALE_5M_USD)
             for w in buys[:5]:
                 seen_trades.add(w["tx"])
                 if len(seen_trades) > 4000:
                     seen_trades.clear()
-                label = w.get("name") or "whale"
+                extra = [
+                    {
+                        "name": "Supply picked up",
+                        "value": (
+                            f"`{w['pct']:.4f}%`"
+                            if w.get("pct") is not None
+                            else "—"
+                        ),
+                        "inline": False,
+                    }
+                ]
                 discord_embed(
                     rick_embed(
-                        "whale tape",
+                        "Whale Purchase",
                         ticker,
                         name,
                         mint,
                         format_whale(w),
                         stats,
                         0xF5C542,
-                        "live book",
-                        label,
+                        smart_s=w.get("name") or "",
+                        social=("\n".join(calls[:4]) if calls else ""),
+                        extra_fields=extra,
                     )
                 )
-            calls = pump_callouts(mint)
             ck = mint + ":call"
             if calls and now - last_whale_ping.get(ck, 0) > 180:
                 last_whale_ping[ck] = now
@@ -777,8 +809,6 @@ def poll_positions():
                         "\n".join(calls[:5]),
                         stats,
                         0xF5C542,
-                        "live book",
-                        "—",
                         fomo="callout hit",
                         social="\n".join(calls[:5]),
                     )
