@@ -49,7 +49,7 @@ Cover:
 7. Kill conditions
 
 Do not invent holder % or dev % if not in the packet.
-Keep it under 700 words. Discord markdown. No links.
+Keep it under 500 words. Discord markdown. No links.
 """
 
 
@@ -78,37 +78,44 @@ def money(n):
 
 def rick_embed(kind, ticker, name, mint, body, stats, color):
     px = stats.get("priceUsd") or "—"
-    chg = stats.get("chg24")
-    chg_s = f"{float(chg):+.1f}%" if chg is not None else "—"
-    desc = (
-        f"**{name or ticker}**\n"
-        f"`{mint}`\n"
-        f"```\n"
-        f"MC {money(stats.get('mc')):<10} Liq {money(stats.get('liq'))}\n"
-        f"Vol {money(stats.get('vol24')):<9}  5m {money(stats.get('vol5'))}\n"
-        f"Px  ${px}   24h {chg_s}\n"
-        f"Age {stats.get('ageHours') or '—'}h   {stats.get('dex') or '—'}\n"
-        f"```\n"
-        f"{body}"
-    )
+    fdv = money(stats.get("mc") or stats.get("fdv"))
+    liq = money(stats.get("liq"))
+    vol = money(stats.get("vol24"))
+    vol1 = money(stats.get("vol1"))
+    age = stats.get("ageHours")
+    age_s = f"{age:.0f}h" if isinstance(age, (int, float)) else "—"
+    chg1 = stats.get("chg1")
+    chg1_s = f"{float(chg1):+.1f}%" if chg1 is not None else "—"
+    buys = stats.get("buys1") or stats.get("buys24") or "—"
+    sells = stats.get("sells1") or stats.get("sells24") or "—"
+    dex = stats.get("dex") or "dex"
+    pair = stats.get("pairUrl") or f"https://dexscreener.com/solana/{mint}"
     axiom = f"https://axiom.trade/t/{mint}"
     photon = f"https://photon-sol.tinyastro.io/en/lp/{mint}"
-    dex = stats.get("pairUrl") or f"https://dexscreener.com/solana/{mint}"
     gmgn = f"https://gmgn.ai/sol/token/{mint}"
+    pf = f"https://pump.fun/{mint}"
+    title_name = name or ticker or mint[:6]
+
+    desc = (
+        f"**{title_name}** · `{kind}` · {dex}\n"
+        f"USD: `{px}`\n"
+        f"MC: **{fdv}**\n"
+        f"Liq: **{liq}**\n"
+        f"Vol: **{vol}** · Age: **{age_s}**\n"
+        f"1H: **{vol1}** · {chg1_s}   buys `{buys}`  sells `{sells}`\n"
+        f"\n"
+        f"`{mint}`\n"
+        f"[AXI]({axiom}) · [PHO]({photon}) · [DEX]({pair}) · [GMGN]({gmgn}) · [PF]({pf})\n"
+    )
+    if body and body != "_tape only_":
+        desc += f"\n{body[:900]}"
+
     embed = {
-        "author": {"name": "SKYZ  ·  scan"},
-        "title": f"${ticker}   {kind}",
-        "url": dex,
+        "title": str(title_name),
+        "url": pair,
         "description": desc[:3900],
         "color": color,
-        "footer": {"text": "axiom  ·  photon  ·  dex  ·  gmgn"},
-        "fields": [
-            {
-                "name": "venues",
-                "value": f"[Axiom]({axiom}) · [Photon]({photon}) · [Dex]({dex}) · [GMGN]({gmgn})",
-                "inline": False,
-            }
-        ],
+        "footer": {"text": f"{kind}  ·  SKYZ"},
     }
     if stats.get("image"):
         embed["thumbnail"] = {"url": stats["image"]}
@@ -136,8 +143,8 @@ def dex_stats(mint):
         age_h = (time.time() * 1000 - created) / 3_600_000
     vol = p.get("volume") or {}
     tx = p.get("txns") or {}
+    chg = p.get("priceChange") or {}
     info = p.get("info") or {}
-    chg = (p.get("priceChange") or {}).get("h24")
     return {
         "name": base.get("name"),
         "symbol": base.get("symbol"),
@@ -147,13 +154,17 @@ def dex_stats(mint):
         "liq": (p.get("liquidity") or {}).get("usd"),
         "vol24": vol.get("h24"),
         "vol5": vol.get("m5"),
+        "vol1": vol.get("h1"),
         "buys5": (tx.get("m5") or {}).get("buys"),
         "sells5": (tx.get("m5") or {}).get("sells"),
+        "buys1": (tx.get("h1") or {}).get("buys"),
+        "sells1": (tx.get("h1") or {}).get("sells"),
         "buys24": (tx.get("h24") or {}).get("buys"),
         "sells24": (tx.get("h24") or {}).get("sells"),
+        "chg1": chg.get("h1"),
+        "chg24": chg.get("h24"),
         "dex": p.get("dexId"),
         "image": info.get("imageUrl"),
-        "chg24": chg,
         "pairUrl": p.get("url"),
         "ageHours": round(age_h, 2) if age_h is not None else None,
         "pairCreatedAt": created,
@@ -304,8 +315,8 @@ def process_buy(buy):
         except Exception:
             report = None
 
-    body = report[:1600] if report else "_tape only_"
-    embed = rick_embed("new bag", ticker, name, mint, body, stats, 0x00C2A8)
+    body = report[:900] if report else ""
+    embed = rick_embed("new bag", ticker, name, mint, body, stats, 0x5865F2)
     discord(embeds=[embed])
 
 
