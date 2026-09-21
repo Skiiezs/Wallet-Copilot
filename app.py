@@ -19,7 +19,7 @@ PUMP_JWT = os.environ.get("PUMP_JWT", "")
 
 SURGE_PCT = float(os.environ.get("SURGE_PCT", "12"))
 WHALE_5M_USD = float(os.environ.get("WHALE_5M_USD", "300"))
-POLL_SEC = int(os.environ.get("POLL_SEC", "45"))
+POLL_SEC = int(os.environ.get("POLL_SEC", "8"))
 
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
@@ -608,6 +608,21 @@ def discord_embed(embed):
         pass
 
 
+def add_watch(mint, stats=None, ticker=None, name=None):
+    mint = (mint or "").strip()
+    if not mint or mint == WSOL:
+        return
+    stats = stats or dex_stats(mint)
+    watch[mint] = {
+        "ticker": ticker or stats.get("ticker") or "?",
+        "name": name or stats.get("name") or ticker or "?",
+        "pair": stats.get("pair"),
+        "entry_px": float(stats.get("price") or 0) or None,
+        "last_px": float(stats.get("price") or 0) or None,
+        "t": time.time(),
+    }
+
+
 def process_buy(mint, sig=None):
     mint = (mint or "").strip()
     if not mint or mint == WSOL:
@@ -647,14 +662,7 @@ def process_buy(mint, sig=None):
             social=social,
         )
     )
-    watch[mint] = {
-        "ticker": ticker,
-        "name": name,
-        "pair": stats.get("pair"),
-        "entry_px": float(stats.get("price") or 0) or None,
-        "last_px": float(stats.get("price") or 0) or None,
-        "t": time.time(),
-    }
+    add_watch(mint, stats=stats, ticker=ticker, name=name)
 
 
 def extract_mints(payload):
@@ -684,6 +692,15 @@ def home():
 
 @app.get("/health")
 def health():
+    return jsonify({"ok": True, "watch": list(watch.keys())})
+
+
+@app.get("/watch")
+def watch_only():
+    mint = request.args.get("mint") or request.args.get("ca")
+    if not mint:
+        return jsonify({"error": "pass ?mint="}), 400
+    add_watch(mint)
     return jsonify({"ok": True, "watch": list(watch.keys())})
 
 
@@ -734,14 +751,51 @@ def format_whale(w):
     )
 
 
+def ping_whales(mint, pos, stats):
+    pair = pos.get("pair") or stats.get("pair")
+    if stats.get("pair"):
+        pos["pair"] = stats["pair"]
+    if not pair:
+        return
+    ticker = pos.get("ticker") or stats.get("ticker") or "?"
+    name = pos.get("name") or stats.get("name") or ticker
+    calls = pump_callouts(mint)
+    buys = whale_buys(pair, mint, WHALE_5M_USD)
+    for w in buys[:8]:
+        seen_trades.add(w["tx"])
+        if len(seen_trades) > 4000:
+            seen_trades.clear()
+        extra = [
+            {
+                "name": "Supply picked up",
+                "value": (
+                    f"`{w['pct']:.4f}%`" if w.get("pct") is not None else "—"
+                ),
+                "inline": False,
+            }
+        ]
+        discord_embed(
+            rick_embed(
+                "Whale Purchase",
+                ticker,
+                name,
+                mint,
+                format_whale(w),
+                stats,
+                0xF5C542,
+                smart_s=w.get("name") or "",
+                social=("\n".join(calls[:4]) if calls else ""),
+                extra_fields=extra,
+            )
+        )
+
+
 def poll_positions():
     while True:
-        time.sleep(POLL_SEC)
         now = time.time()
         for mint, pos in list(watch.items()):
             stats = dex_stats(mint)
-            if stats.get("pair"):
-                pos["pair"] = stats["pair"]
+            ping_whales(mint, pos, stats)
             px = float(stats.get("price") or 0) or None
             if not px:
                 continue
@@ -767,36 +821,6 @@ def poll_positions():
                     )
                 )
             calls = pump_callouts(mint)
-            buys = whale_buys(pos.get("pair") or stats.get("pair"), mint, WHALE_5M_USD)
-            for w in buys[:5]:
-                seen_trades.add(w["tx"])
-                if len(seen_trades) > 4000:
-                    seen_trades.clear()
-                extra = [
-                    {
-                        "name": "Supply picked up",
-                        "value": (
-                            f"`{w['pct']:.4f}%`"
-                            if w.get("pct") is not None
-                            else "—"
-                        ),
-                        "inline": False,
-                    }
-                ]
-                discord_embed(
-                    rick_embed(
-                        "Whale Purchase",
-                        ticker,
-                        name,
-                        mint,
-                        format_whale(w),
-                        stats,
-                        0xF5C542,
-                        smart_s=w.get("name") or "",
-                        social=("\n".join(calls[:4]) if calls else ""),
-                        extra_fields=extra,
-                    )
-                )
             ck = mint + ":call"
             if calls and now - last_whale_ping.get(ck, 0) > 180:
                 last_whale_ping[ck] = now
@@ -813,6 +837,7 @@ def poll_positions():
                         social="\n".join(calls[:5]),
                     )
                 )
+        time.sleep(POLL_SEC)
 
 
 def start_poller():
