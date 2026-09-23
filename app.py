@@ -25,6 +25,9 @@ POLL_SEC = int(os.environ.get("POLL_SEC", "8"))
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 WSOL = "So11111111111111111111111111111111111111112"
+USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+SKIP_MINTS = {WSOL, USDC, USDT}
 PUMP_API = "https://frontend-api-v3.pump.fun"
 GECKO = "https://api.geckoterminal.com/api/v2"
 
@@ -803,7 +806,7 @@ def discord_embed(embed):
 
 def add_watch(mint, stats=None, ticker=None, name=None):
     mint = (mint or "").strip()
-    if not mint or mint == WSOL:
+    if not mint or mint in SKIP_MINTS:
         return
     stats = stats or dex_stats(mint)
     watch[mint] = {
@@ -818,7 +821,7 @@ def add_watch(mint, stats=None, ticker=None, name=None):
 
 def process_buy(mint, sig=None):
     mint = (mint or "").strip()
-    if not mint or mint == WSOL:
+    if not mint or mint in SKIP_MINTS:
         return
     first = mint not in grok_done
     stats = dex_stats(mint)
@@ -867,13 +870,13 @@ def extract_mints(payload):
         for xf in ev.get("tokenTransfers") or []:
             mint = xf.get("mint")
             to_ = (xf.get("toUserAccount") or xf.get("toUser") or "").strip()
-            if mint and WALLET and to_ == WALLET and mint != WSOL:
+            if mint and WALLET and to_ == WALLET and mint not in SKIP_MINTS:
                 mints.append(mint)
         swap = (ev.get("events") or {}).get("swap")
         if swap:
             for outt in swap.get("tokenOutputs") or []:
                 mint = outt.get("mint")
-                if mint and mint != WSOL:
+                if mint and mint not in SKIP_MINTS:
                     mints.append(mint)
     return list(dict.fromkeys(mints))
 
@@ -893,6 +896,8 @@ def watch_only():
     mint = request.args.get("mint") or request.args.get("ca")
     if not mint:
         return jsonify({"error": "pass ?mint="}), 400
+    if mint in SKIP_MINTS:
+        return jsonify({"error": "stable/wsol skipped", "mint": mint}), 400
     add_watch(mint)
     return jsonify({"ok": True, "watch": list(watch.keys())})
 
@@ -918,6 +923,8 @@ def test():
     mint = request.args.get("mint") or request.args.get("ca")
     if not mint:
         return jsonify({"error": "pass ?mint="}), 400
+    if mint in SKIP_MINTS:
+        return jsonify({"error": "stable/wsol skipped", "mint": mint}), 400
     process_buy(mint)
     return jsonify({"ok": True, "mint": mint})
 
@@ -945,6 +952,8 @@ def format_whale(w):
 
 
 def ping_whales(mint, pos, stats):
+    if mint in SKIP_MINTS:
+        return
     pair = pos.get("pair") or stats.get("pair")
     if stats.get("pair"):
         pos["pair"] = stats["pair"]
@@ -997,6 +1006,9 @@ def poll_positions():
     while True:
         now = time.time()
         for mint, pos in list(watch.items()):
+            if mint in SKIP_MINTS:
+                watch.pop(mint, None)
+                continue
             stats = dex_stats(mint)
             ping_whales(mint, pos, stats)
             px = float(stats.get("price") or 0) or None
