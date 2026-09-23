@@ -861,23 +861,45 @@ def process_buy(mint, sig=None):
     add_watch(mint, stats=stats, ticker=ticker, name=name)
 
 
+def _swap_paid(swap):
+    native_in = swap.get("nativeInput") or {}
+    try:
+        if int(native_in.get("amount") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    for inn in swap.get("tokenInputs") or []:
+        mint = inn.get("mint") or ""
+        if mint not in SKIP_MINTS:
+            continue
+        amt = inn.get("tokenAmount")
+        if amt is None:
+            raw = inn.get("rawTokenAmount") or {}
+            amt = raw.get("tokenAmount")
+        try:
+            if float(amt or 0) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def extract_mints(payload):
     mints = []
     events = payload if isinstance(payload, list) else [payload]
     for ev in events:
         if not isinstance(ev, dict):
             continue
-        for xf in ev.get("tokenTransfers") or []:
-            mint = xf.get("mint")
-            to_ = (xf.get("toUserAccount") or xf.get("toUser") or "").strip()
-            if mint and WALLET and to_ == WALLET and mint not in SKIP_MINTS:
+        payer = (ev.get("feePayer") or "").strip()
+        if WALLET and payer and payer != WALLET:
+            continue
+        swap = (ev.get("events") or {}).get("swap") or {}
+        if not swap or not _swap_paid(swap):
+            continue
+        for outt in swap.get("tokenOutputs") or []:
+            mint = outt.get("mint")
+            if mint and mint not in SKIP_MINTS:
                 mints.append(mint)
-        swap = (ev.get("events") or {}).get("swap")
-        if swap:
-            for outt in swap.get("tokenOutputs") or []:
-                mint = outt.get("mint")
-                if mint and mint not in SKIP_MINTS:
-                    mints.append(mint)
     return list(dict.fromkeys(mints))
 
 
