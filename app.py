@@ -39,23 +39,12 @@ seen_trades = set()
 wallet_cache = {}
 
 KOLS = {
-    "Cented": "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
-    "Gake": "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm",
-    "Euris": "DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj",
-    "Profit": "G5nxEXuFMfV74DSnsrSatqCW32F34XUnBeq3PfDS7w5E",
-    "Waddles": "73LnJ7G9ffBDjEBGgJDdgvLUhD5APLonKrNiHsKDCw5B",
-    "Mr Frog": "4DdrfiDHpmx55i4SPssxVzS9ZaKLb8qr45NKY9Er9nNh",
-    "Joji": "525LueqAyZJueCoiisfWy6nyh4MTvmF4X9jSqi6efXJT",
-    "Jijo": "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
-    "Letterbomb": "BtMBMPkoNbnLF9Xn552guQq528KKXcsNBNNBre3oaQtr",
-    "Orangie": "26kZ9rg8Y5pd4j1tdT4cbT8BQRu5uDbXkaVs3L5QasHy",
-    "Cooker": "8deJ9xeUvXSJwicYptA9mHsU2rN2pDx37KWzkDkEXhU6",
-    "Insentos": "7SDs3PjT2mswKQ7Zo4FTucn9gJdtuW4jaacPA65BseHS",
-    "Frank": "CRVidEDtEUTYZisCxBZkpELzhQc9eauMLR3FWg74tReL",
-    "Bastille": "3kebnKw7cPdSkLRfiMEALyZJGZ4wdiSRvmoN4rD1yPzV",
-    "Yenni": "5B52w1ZW9tuwUduueP5J7HXz5AcGfruGoX6YoAudvyxG",
-    "Publix": "86AEJExyjeNNgcp7GrAvCXTDicf5aGWgoERbXFiG1EdD",
-    "Heyitsyolo": "Av3xWHJ5EsoLZag6pr7LKbrGgLRTaykXomDD5kBhL9YQ",
+    "Tommy": "HDPULyHhMqwfWh45z2fQoGzmdp6dcRihy57dxucmrScg",
+    "Lyon": "4DovZLQMSrHhptkcteC7x5UCGRSEmLqfAQKtjBUEJxC1",
+    "Passback": "5aLY85pyxiuX3fd4RgM3Yc1e3MAL6b7UgaZz6MS3JUfG",
+    "Aurelius": "9BMzTpSo4URse1oN666pmexhdjpU1vA5p7LtroCFQdLU",
+    "Saiyan": "DNKYBhwqyC8VPUBqYXBCscLno9bz7j5tRmSK5G4otQ7Y",
+   ,
 }
 KOL_BY_ADDR = {v: k for k, v in KOLS.items()}
 
