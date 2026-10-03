@@ -43,7 +43,9 @@ KOLS = {
     "Lyon": "4DovZLQMSrHhptkcteC7x5UCGRSEmLqfAQKtjBUEJxC1",
     "Passback": "5aLY85pyxiuX3fd4RgM3Yc1e3MAL6b7UgaZz6MS3JUfG",
     "Aurelius": "9BMzTpSo4URse1oN666pmexhdjpU1vA5p7LtroCFQdLU",
-    "Saiyan": "DNKYBhwqyC8VPUBqYXBCscLno9bz7j5tRmSK5G4otQ7Y",
+    "DevinDesk": "8txbzMXPB2He8zKidWmxjpFLkNXiojHgeNkHnqmQZEnH",
+    "Devin": "FjqfUQX5jFn2ikPNt8ihb9A1PJAZN34QmCnAngs6svyT",
+    "RSMR": "9CNyLECt2j8tnDhqxtjYk5HUhZ2b8Nwnyb7sfYN7vND2",
 }
 KOL_BY_ADDR = {v: k for k, v in KOLS.items()}
 
