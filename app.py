@@ -44,7 +44,6 @@ KOLS = {
     "Passback": "5aLY85pyxiuX3fd4RgM3Yc1e3MAL6b7UgaZz6MS3JUfG",
     "Aurelius": "9BMzTpSo4URse1oN666pmexhdjpU1vA5p7LtroCFQdLU",
     "Saiyan": "DNKYBhwqyC8VPUBqYXBCscLno9bz7j5tRmSK5G4otQ7Y",
-   ,
 }
 KOL_BY_ADDR = {v: k for k, v in KOLS.items()}
 
